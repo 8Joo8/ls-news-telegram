@@ -1,0 +1,129 @@
+name: LS news alerts
+
+"on":
+  push:
+    branches: [main]
+    paths: [".github/workflows/news-alert.yml"]
+  workflow_dispatch:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ls-news-alerts
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Check and send news
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, time
+          from pathlib import Path
+          from urllib.error import HTTPError
+          from urllib.request import Request, urlopen
+
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+          if not token or not chat_id:
+              raise SystemExit("Missing Telegram secrets.")
+
+          def fetch(url, data=None):
+              service = "Telegram" if data is not None else "News"
+              try:
+                  headers = {"User-Agent": "Mozilla/5.0"}
+                  if data is not None:
+                      headers["Content-Type"] = "application/json"
+                  request = Request(url, data=data, headers=headers)
+                  with urlopen(request, timeout=30) as response:
+                      return json.load(response)
+              except HTTPError as error:
+                  raise SystemExit(f"{service} HTTP error: {error.code}")
+              except Exception:
+                  raise SystemExit(f"{service} network or data error.")
+
+          def send(text):
+              data = json.dumps({"chat_id": chat_id, "text": text}).encode("utf-8")
+              result = fetch("https://api.telegram.org/bot" + token + "/sendMessage", data)
+              if not isinstance(result, dict) or result.get("ok") is not True:
+                  raise SystemExit("Telegram message rejected.")
+
+          url = "https://ai-powered-ir-intelligence-agent.vercel.app/api/news?source=naver"
+          feed = fetch(url)
+          if not isinstance(feed, dict) or feed.get("success") is not True:
+              raise SystemExit("News API returned an error.")
+          if not isinstance(feed.get("data"), list) or not feed["data"]:
+              raise SystemExit("News list is empty.")
+
+          articles = []
+          for item in feed["data"]:
+              if not isinstance(item, dict):
+                  continue
+              link, title = item.get("url"), item.get("title")
+              if not isinstance(link, str) or not link.startswith(("http://", "https://")):
+                  continue
+              if not isinstance(title, str) or not title.strip():
+                  continue
+              key = hashlib.sha256(link.encode("utf-8")).hexdigest()
+              source = str(item.get("source") or "출처 미상")
+              articles.append((key, title[:500], source[:100], link))
+          if not articles:
+              raise SystemExit("No usable news articles.")
+
+          state = Path("seen-news.json")
+          def save(keys):
+              temp = state.with_suffix(".tmp")
+              temp.write_text(json.dumps(keys[-5000:]), encoding="utf-8")
+              temp.replace(state)
+          def message(article):
+              return "\n".join(article[1:])
+
+          if not state.exists():
+              send("✅ LS 뉴스 알림 연결 완료!\n\n현재 뉴스 1건:\n" + message(articles[0]))
+              save(list(dict.fromkeys(a[0] for a in reversed(articles))))
+              print("Initialized news alerts.")
+          else:
+              try:
+                  keys = json.loads(state.read_text(encoding="utf-8"))
+              except Exception:
+                  raise SystemExit("Cannot read news state.")
+              if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
+                  raise SystemExit("Invalid news state.")
+              seen = set(keys)
+              count = 0
+              for article in reversed(articles):
+                  if article[0] in seen:
+                      continue
+                  send("📰 새 뉴스\n\n" + message(article))
+                  keys.append(article[0])
+                  seen.add(article[0])
+                  save(keys)
+                  count += 1
+                  time.sleep(1.1)
+              print("New articles sent:", count)
+          PY
+
+      - name: Save sent-news record
+        if: always()
+        run: |
+          if [ -f seen-news.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add seen-news.json
+            if ! git diff --cached --quiet; then
+              git commit -m "Update seen news"
+              git push origin HEAD:main
+            fi
+          fi
