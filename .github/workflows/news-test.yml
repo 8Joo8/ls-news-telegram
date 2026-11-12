@@ -1,0 +1,29 @@
+name: News connection test
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check news
+        run: |
+          python3 - <<'PY'
+          import json
+          from urllib.request import Request, urlopen
+
+          url = "https://ai-powered-ir-intelligence-agent.vercel.app/api/news?source=naver"
+          request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+          with urlopen(request, timeout=30) as response:
+              result = json.load(response)
+
+          if not isinstance(result, dict) or result.get("success") is not True:
+              raise RuntimeError("News API did not return success")
+          news = result.get("data")
+          if not isinstance(news, list) or not news:
+              raise RuntimeError("News data is missing or empty")
+          print("NEWS_OK:", len(news), "articles")
+          PY
